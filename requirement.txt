@@ -1,0 +1,30 @@
+# Deep learning
+# torch
+# torchvision
+# torchaudio
+
+# Data processing
+# numpy
+# pandas
+
+# Machine learning
+# scikit-learn
+
+# Survival analysis
+lifelines
+
+# Progress bars
+tqdm
+
+# Image processing
+Pillow
+
+# Visualization
+matplotlib
+
+# HuggingFace ecosystem (for UNI / foundation models)
+transformers
+huggingface-hub
+
+# Scientific computing
+scipy

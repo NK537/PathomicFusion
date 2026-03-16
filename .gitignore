@@ -3,5 +3,6 @@
 .pathomic/
 venv/
 env/
+pathomic/
 __pycache__/
 *.pyc
