@@ -1,20 +1,3 @@
-import os
-import time
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
-from tqdm import tqdm
-from lifelines.utils import concordance_index
-
-from models.CNN import CNNBranch
-from models.MLP import MLPBranch
-from pytorch_dataset_loader.patches_pytorch_dataset import PatchDataset
-from pytorch_dataset_loader.pytorch_GeneDataset import GeneDataset
-from fusion.attention_fusion import AttentionFusion
-from COX.cox_loss import CustomCoxLoss
 from train_for_cancer import train_for_cancer
 
 # ------------------------------
