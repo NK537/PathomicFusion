@@ -1,0 +1,191 @@
+﻿import os
+import torch
+import pandas as pd
+from PIL import Image
+from tqdm import tqdm
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
+import sys
+
+# Spatiopath model wrapper — adjust the import once you have the repo installed.
+# Clone:  git clone https://gitlab.pasteur.fr/bia/projects/Spatiopath.git
+# Install: cd Spatiopath && pip install -e .
+# Then uncomment the import below and set SPATIOPATH_AVAILABLE = True.
+SPATIOPATH_AVAILABLE = False
+try:
+    sys.path.append("Spatiopath/")
+    from spatiopath import get_spatiopath_encoder   # adjust to actual API
+    SPATIOPATH_AVAILABLE = True
+except ImportError:
+    pass
+
+# Fallback: use UNI (already in repo) until Spatiopath is installed.
+UNI_AVAILABLE = False
+try:
+    sys.path.append("UNI/")
+    from uni import get_encoder as get_uni_encoder
+    UNI_AVAILABLE = True
+except ImportError:
+    pass
+
+# Embedding dim: 1024 for UNI / check Spatiopath paper for its dim.
+# Update HISTO_EMBED_DIM after confirming the Spatiopath output size.
+HISTO_EMBED_DIM = 1024
+
+
+def load_histo_model(device, use_spatiopath=False):
+    """
+    Load the histopathology foundation model.
+
+    Priority order:
+      1. Spatiopath  (if installed and use_spatiopath=True)
+      2. UNI-1       (fallback, already cloned in repo)
+    """
+    if use_spatiopath and SPATIOPATH_AVAILABLE:
+        print("Loading Spatiopath encoder...")
+        model, transform = get_spatiopath_encoder(device=device)
+        print("  Spatiopath loaded.")
+        return model, transform
+
+    if UNI_AVAILABLE:
+        print("Loading UNI encoder (Spatiopath not available or not requested)...")
+        model, transform = get_uni_encoder(enc_name="uni", device=device)
+        model.eval()
+        print("  UNI loaded. Embedding dim: 1024")
+        return model, transform
+
+    raise RuntimeError(
+        "Neither Spatiopath nor UNI could be imported.\n"
+        "  - UNI:       clone https://github.com/mahmoodlab/UNI and pip install -e UNI/\n"
+        "  - Spatiopath: clone https://gitlab.pasteur.fr/bia/projects/Spatiopath and pip install -e Spatiopath/"
+    )
+
+
+class HistoPatchDataset(Dataset):
+    """
+    Expected CSV columns:
+        patient_id      - Picasso patient identifier
+        patch_filename  - filename of the histopathology patch image
+
+    Returns (tensor, save_path) per patch.
+    """
+    def __init__(self, patch_csv, patch_dir, out_dir, transform, skip_existing=True):
+        df = pd.read_csv(patch_csv)
+        self.patch_files = sorted(set(df["patch_filename"].astype(str).tolist()))
+        self.patch_dir   = patch_dir
+        self.out_dir     = out_dir
+        self.transform   = transform
+        os.makedirs(out_dir, exist_ok=True)
+
+        if skip_existing:
+            self.patch_files = [
+                fn for fn in self.patch_files
+                if not os.path.exists(
+                    os.path.join(out_dir, os.path.splitext(fn)[0] + ".pt")
+                )
+            ]
+        print(f"  Patches to embed: {len(self.patch_files)}")
+
+    def __len__(self):
+        return len(self.patch_files)
+
+    def __getitem__(self, idx):
+        fn       = self.patch_files[idx]
+        img      = Image.open(os.path.join(self.patch_dir, fn)).convert("RGB")
+        x        = self.transform(img)
+        out_path = os.path.join(self.out_dir, os.path.splitext(fn)[0] + ".pt")
+        return x, out_path
+
+
+def precompute_histo_embeddings(
+    patch_csv,
+    patch_dir,
+    out_dir,
+    use_spatiopath=False,
+    batch_size=64,
+    num_workers=4,
+    device=None,
+    fp16=True,
+    skip_existing=True,
+):
+    """
+    Precompute histopathology foundation-model embeddings for all patches.
+
+    Saves one .pt file per patch under out_dir.
+    Default model: UNI (1024-D). Switch to Spatiopath by setting
+    use_spatiopath=True once the repo is installed.
+
+    Args:
+        patch_csv:       CSV with columns [patient_id, patch_filename]
+        patch_dir:       Root directory containing the raw patch images
+        out_dir:         Root directory where .pt files will be written
+        use_spatiopath:  Use Spatiopath instead of UNI when available
+        batch_size:      Images per GPU batch
+        fp16:            AMP half-precision on GPU
+        skip_existing:   Skip patches whose .pt already exists
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    model, transform = load_histo_model(device, use_spatiopath)
+    model.eval()
+
+    ds = HistoPatchDataset(patch_csv, patch_dir, out_dir, transform, skip_existing)
+    if len(ds) == 0:
+        print("Nothing to embed — all patches already processed.")
+        return
+
+    loader = DataLoader(
+        ds, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=(device == "cuda"), drop_last=False,
+    )
+
+    use_amp = (device == "cuda") and fp16
+    saved = failed = 0
+
+    with torch.inference_mode():
+        for xb, out_paths in tqdm(loader, desc="Histo embeddings"):
+            try:
+                xb = xb.to(device, non_blocking=True)
+
+                if use_amp:
+                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                        emb = model(xb)
+                else:
+                    emb = model(xb)
+
+                emb = emb.float().detach().cpu()
+
+                for i, op in enumerate(out_paths):
+                    parent = os.path.dirname(op)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    torch.save(emb[i], op)
+
+                saved += len(out_paths)
+
+            except Exception as e:
+                print(f"\n[WARN] batch failed: {e}")
+                failed += len(out_paths)
+
+    print(f"\n=== DONE ===  saved={saved}  failed={failed}")
+
+    for root, _, files in os.walk(out_dir):
+        for f in files:
+            if f.endswith(".pt"):
+                x = torch.load(os.path.join(root, f), map_location="cpu")
+                print(f"Sample embedding shape: {x.shape}")
+                return
+
+
+if __name__ == "__main__":
+    precompute_histo_embeddings(
+        patch_csv      = "data/Picasso/histo_patches.csv",
+        patch_dir      = "data/Picasso/histo_patches/",
+        out_dir        = "data/Picasso/histo_embeddings/",
+        use_spathopath = False,   # flip to True once Spatiopath is installed
+        batch_size     = 64,
+        num_workers    = 4,
+        fp16           = True,
+        skip_existing  = True,
+    )

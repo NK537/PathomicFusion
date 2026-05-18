@@ -4,6 +4,8 @@ import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
+import sys
+sys.path.append("UNI/")  # Adjust if your UNI repo is in a different location
 
 # UNI repo import (you already cloned UNI/)
 from uni import get_encoder
@@ -51,7 +53,7 @@ class PatchCSVDataset(Dataset):
         base = os.path.splitext(fn)[0]
         out_path = os.path.join(self.out_dir, base + ".pt")
 
-        # Load + transform
+        # Load + transform image into 224x224 tensor (UNI's default)
         img = Image.open(img_path).convert("RGB")
         x = self.transform(img)  # tensor (3,H,W)
 

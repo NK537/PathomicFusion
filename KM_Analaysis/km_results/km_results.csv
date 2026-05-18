@@ -1,0 +1,5 @@
+Model,run_label,n_high_risk,n_low_risk,p_value,significant
+M1: UNI + MLP + Attention,old_mlp,381,380,7.084619521832569e-81,Yes
+M2: UNI + MLP + Cross-Attention,new_mlp,381,380,2.3173653416688873e-73,Yes
+M3: UNI + Geneformer + Attention,old_geneformer,381,380,4.386036212004307e-75,Yes
+M4: UNI + Geneformer + Cross-Attention,new_geneformer,381,380,8.299806685700141e-68,Yes
