@@ -20,10 +20,10 @@ def build_fusion(cfg):
     """Instantiate fusion layer from config."""
     if cfg["fusion_type"] == "cross_attention":
         return CrossAttentionFusion(
-            d_model    = cfg["out_dim"],
-            n_heads    = cfg["n_heads"],
+            d_model       = cfg["out_dim"],
+            n_heads       = cfg["n_heads"],
             n_gene_tokens = cfg["n_tokens"],
-            fusion_dim = cfg["fusion_dim"],
+            fusion_dim    = cfg["fusion_dim"],
         )
     elif cfg["fusion_type"] == "concat":
         return _ConcatFusion(in_dim=cfg["out_dim"], fusion_dim=cfg["fusion_dim"])
@@ -44,8 +44,8 @@ class _ConcatFusion(nn.Module):
         )
 
     def forward(self, histo_feat, endo_feat):
-        fused = torch.cat([histo_feat, endo_feat], dim=1)   # (B, 2*in_dim)
-        return self.head(fused).squeeze(1)                  # (B,)
+        fused = torch.cat([histo_feat, endo_feat], dim=1)
+        return self.head(fused).squeeze(1)
 
 
 class _SingleBranchHead(nn.Module):
@@ -61,18 +61,24 @@ class _SingleBranchHead(nn.Module):
         )
 
     def forward(self, feat, _ignored=None):
-        return self.head(feat).squeeze(1)   # (B,)
+        return self.head(feat).squeeze(1)
 
 
 def train_picasso(
     cfg,
     train_ids,
     val_ids,
-    fold_idx=None,
-    ablation=None,   # None | "histo_only" | "endo_only"
+    fold_idx = None,
+    ablation = None,   # None | "histo_only" | "endo_only"
 ):
     """
     Train one fold of the Picasso bimodal survival model.
+
+    Histopathology branch freezing is controlled by cfg["freeze_histo"]:
+        True  (default) — HistoMILBranch weights are FROZEN.
+                          Only EndoMILBranch + fusion are optimised.
+                          Histo embeddings are still used as fixed features.
+        False           — All three components are trained end-to-end.
 
     Args:
         cfg:       PICASSO_CONFIG dict from config_picasso.py
@@ -84,13 +90,16 @@ def train_picasso(
     Returns:
         best_val_cindex (float)
     """
+    freeze_histo = cfg.get("freeze_histo", False)
+
     tag  = f"_fold{fold_idx}" if fold_idx is not None else ""
     mode = ablation if ablation else cfg["fusion_type"]
-    print(f"\n==== Picasso | {mode}{tag} ====")
+    frozen_tag = "_histoFROZEN" if freeze_histo else ""
+    print(f"\n==== Picasso | {mode}{frozen_tag}{tag} ====")
 
     os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
 
-    # ── Datasets ────────────────────────────────────────────────────────────
+    # ── Datasets ─────────────────────────────────────────────────────────────
     train_ds = PatientBimodalDataset(
         histo_patches_csv = cfg["histo_patches_csv"],
         endo_frames_csv   = cfg["endo_frames_csv"],
@@ -115,13 +124,11 @@ def train_picasso(
     train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True,  drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=cfg["batch_size"], shuffle=False)
 
-    # ── Models ──────────────────────────────────────────────────────────────
+    # ── Models ───────────────────────────────────────────────────────────────
     histo_branch = HistoMILBranch(histo_dim=cfg["histo_dim"], out_dim=cfg["out_dim"])
-    endo_branch  = EndoMILBranch(endo_dim=cfg["endo_dim"],   out_dim=cfg["out_dim"])
+    endo_branch  = EndoMILBranch(endo_dim=cfg["endo_dim"],    out_dim=cfg["out_dim"])
 
-    if ablation == "histo_only":
-        fusion = _SingleBranchHead(in_dim=cfg["out_dim"], fusion_dim=cfg["fusion_dim"])
-    elif ablation == "endo_only":
+    if ablation in ("histo_only", "endo_only"):
         fusion = _SingleBranchHead(in_dim=cfg["out_dim"], fusion_dim=cfg["fusion_dim"])
     else:
         fusion = build_fusion(cfg)
@@ -131,23 +138,46 @@ def train_picasso(
     endo_branch.to(device)
     fusion.to(device)
 
-    # ── Optimizer ───────────────────────────────────────────────────────────
-    params = (
-        list(histo_branch.parameters()) +
+    # ── Freeze histo branch (optional) ───────────────────────────────────────
+    # Weights are locked: no gradients, no parameter updates, eval mode always.
+    # The branch still runs forward — its output feeds into the fusion layer
+    # as fixed features derived from the pre-computed embeddings.
+    if freeze_histo:
+        histo_branch.requires_grad_(False)
+        histo_branch.eval()
+        print("  [HistoMILBranch] FROZEN — weights will not be updated.")
+
+    # ── Optimizer — only train unfrozen parameters ────────────────────────────
+    trainable_params = (
         list(endo_branch.parameters()) +
         list(fusion.parameters())
     )
-    optimizer = optim.Adam(params, lr=cfg["lr"])
+    if not freeze_histo:
+        trainable_params = list(histo_branch.parameters()) + trainable_params
+
+    optimizer = optim.Adam(trainable_params, lr=cfg["lr"])
     cox_loss  = CustomCoxLoss()
 
-    # ── Training loop ────────────────────────────────────────────────────────
+    print(
+        f"  Trainable params: {sum(p.numel() for p in trainable_params):,}  |  "
+        f"Frozen histo params: "
+        f"{sum(p.numel() for p in histo_branch.parameters()):,}"
+        if freeze_histo else
+        f"  Trainable params: {sum(p.numel() for p in trainable_params):,}"
+    )
+
+    # ── Training loop ─────────────────────────────────────────────────────────
     best_val_cindex   = 0.0
     epochs_no_improve = 0
 
     for epoch in range(cfg["num_epochs"]):
 
-        # ---- Train ----
-        histo_branch.train(); endo_branch.train(); fusion.train()
+        # ---- Train mode (histo_branch stays eval if frozen) ----
+        if not freeze_histo:
+            histo_branch.train()
+        endo_branch.train()
+        fusion.train()
+
         running_loss = 0.0
         all_scores, all_times, all_events = [], [], []
 
@@ -159,15 +189,21 @@ def train_picasso(
             surv_times = surv_times.to(device)
             events     = events.to(device)
 
-            histo_feat = histo_branch(histo_embs)   # (B, out_dim)
-            endo_feat  = endo_branch(endo_embs)     # (B, out_dim)
+            # Run histo branch — no grad if frozen
+            if freeze_histo:
+                with torch.no_grad():
+                    histo_feat = histo_branch(histo_embs)   # (B, out_dim) — fixed
+            else:
+                histo_feat = histo_branch(histo_embs)
+
+            endo_feat = endo_branch(endo_embs)              # (B, out_dim) — trained
 
             if ablation == "histo_only":
                 scores = fusion(histo_feat)
             elif ablation == "endo_only":
                 scores = fusion(endo_feat)
             else:
-                scores = fusion(histo_feat, endo_feat)  # (B,)
+                scores = fusion(histo_feat, endo_feat)      # (B,)
 
             loss = cox_loss(scores, surv_times, events)
             optimizer.zero_grad()
@@ -232,12 +268,13 @@ def train_picasso(
         if val_cindex > best_val_cindex + 0.001:
             best_val_cindex = val_cindex
             epochs_no_improve = 0
-            ckpt_name = f"picasso_{mode}{tag}.pth"
+            ckpt_name = f"picasso_{mode}{frozen_tag}{tag}.pth"
             torch.save(
                 {
                     "histo_branch": histo_branch.state_dict(),
                     "endo_branch":  endo_branch.state_dict(),
                     "fusion":       fusion.state_dict(),
+                    "freeze_histo": freeze_histo,
                     "val_cindex":   val_cindex,
                     "epoch":        epoch,
                 },

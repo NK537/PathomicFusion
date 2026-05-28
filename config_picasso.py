@@ -20,7 +20,7 @@ PICASSO_CONFIG = {
     "label_csv":         "data/Picasso/survival_labels.csv",
 
     # ── Pre-computed embedding directories ───────────────────────────────────
-    # Run precompute_histo_embeddings.py  and  precompute_endo_embeddings.py
+    # Run precompute_histo_embeddings.py and precompute_endo_embeddings.py
     # once before training.
     "histo_emb_dir": "data/Picasso/histo_embeddings/",
     "endo_emb_dir":  "data/Picasso/endo_embeddings/",
@@ -29,12 +29,19 @@ PICASSO_CONFIG = {
     "histo_dim": 1024,   # UNI / Spatiopath  (update if Spatiopath differs)
     "endo_dim":  384,    # GastroNet-5M ViT-small/16
 
-    # ── MIL sampling  ────────────────────────────────────────────────────────
+    # ── MIL sampling ─────────────────────────────────────────────────────────
     "k_histo": 32,       # patches sampled per patient  (histo)
     "k_endo":  16,       # frames  sampled per patient  (endo)
 
     # ── Shared branch output dim (both branches project to this) ─────────────
     "out_dim": 64,
+
+    # ── Histopathology branch freeze ─────────────────────────────────────────
+    # True  — HistoMILBranch weights are FROZEN during training.
+    #         Histo embeddings are still loaded and used as fixed features.
+    #         Only EndoMILBranch + fusion layer weights are updated.
+    #         Set to False when you are ready to fine-tune the histo branch.
+    "freeze_histo": True,
 
     # ── Fusion ───────────────────────────────────────────────────────────────
     # Options: "cross_attention" | "concat"
