@@ -1,61 +1,50 @@
 ﻿# config_picasso.py
 #
-# Central config for the Picasso bimodal survival pipeline.
-# Update the paths once you know the exact dataset layout.
+# Central config for the Picasso endoscopy survival pipeline.
 #
-# CSV format expected:
-#   histo_patches_csv  ->  columns: patient_id, patch_filename
-#   endo_frames_csv    ->  columns: patient_id, frame_filename
-#   label_csv          ->  columns: patient_id, survival_months, censored
-#                                   (censored=1 means event NOT observed)
+# Label file columns (PicassoOnly_Outcome_train.xlsx):
+#   code              -> patient ID, e.g. "0101"  (maps to pat0101 in filenames)
+#   days_to_outcome   -> days from procedure to event  (-1 = censored / unknown)
+#   ANY OUTCOME       -> 1 = event observed, 0 = censored
+#   date_of_procedure -> used to compute censoring time when days_to_outcome = -1
+#   date_of_visit     -> used to compute censoring time when days_to_outcome = -1
 
 PICASSO_CONFIG = {
-    # ── Raw data paths ───────────────────────────────────────────────────────
-    "histo_patches_csv": "data/Picasso/histo_patches.csv",
-    "histo_patch_dir":   "data/Picasso/histo_patches/",
+    # ── Label file ────────────────────────────────────────────────────────────
+    "label_xlsx": "data/Picasso/PicassoOnly_Outcome_train.xlsx",
 
-    "endo_frames_csv":   "data/Picasso/endo_frames.csv",
-    "endo_frame_dir":    "data/Picasso/endo_frames/",
+    # ── Pre-computed endoscopy embedding directory ────────────────────────────
+    # Source: Picasso_WL_Train_fullframe_RN50_GastroNet5M
+    # File pattern: RN50_GastroNet5M_DINOv1_feat_WLE_PicassoTrain_pat{code}_section{1|2}
+    "endo_emb_dir": "data/Picasso/Picasso_WL_Train_fullframe_RN50_GastroNet5M/",
+    "endo_emb_prefix": "RN50_GastroNet5M_DINOv1_feat_WLE_PicassoTrain",
 
-    "label_csv":         "data/Picasso/survival_labels.csv",
+    # ── Embedding dim ─────────────────────────────────────────────────────────
+    # ResNet50 output = 2048.  Update here if you switch to ViT-b/16 EndoFM.
+    "endo_dim": 2048,
 
-    # ── Pre-computed embedding directories ───────────────────────────────────
-    # Run precompute_histo_embeddings.py and precompute_endo_embeddings.py
-    # once before training.
-    "histo_emb_dir": "data/Picasso/histo_embeddings/",
-    "endo_emb_dir":  "data/Picasso/endo_embeddings/",
-
-    # ── Foundation model dims (must match what was precomputed) ──────────────
-    "histo_dim": 1024,   # UNI / Spatiopath  (update if Spatiopath differs)
-    "endo_dim":  384,    # GastroNet-5M ViT-small/16
-
-    # ── MIL sampling ─────────────────────────────────────────────────────────
-    "k_histo": 32,       # patches sampled per patient  (histo)
-    "k_endo":  16,       # frames  sampled per patient  (endo)
-
-    # ── Shared branch output dim (both branches project to this) ─────────────
+    # ── Shared branch output dim ──────────────────────────────────────────────
     "out_dim": 64,
 
-    # ── Histopathology branch freeze ─────────────────────────────────────────
-    # True  — HistoMILBranch weights are FROZEN during training.
-    #         Histo embeddings are still loaded and used as fixed features.
-    #         Only EndoMILBranch + fusion layer weights are updated.
-    #         Set to False when you are ready to fine-tune the histo branch.
+    # ── Histopathology (not available yet — branch is frozen / skipped) ───────
+    # Set freeze_histo=True to use histo as fixed features once embeddings exist.
+    # Set freeze_histo=False to train histo branch end-to-end.
     "freeze_histo": True,
+    "histo_emb_dir": None,       # fill in when histo embeddings are ready
+    "histo_dim":     1024,       # UNI / Spatiopath
 
-    # ── Fusion ───────────────────────────────────────────────────────────────
-    # Options: "cross_attention" | "concat"
+    # ── Fusion (used when both modalities are active) ─────────────────────────
     "fusion_type": "cross_attention",
     "n_heads":     4,
     "n_tokens":    8,
     "fusion_dim":  128,
 
-    # ── Training ─────────────────────────────────────────────────────────────
+    # ── Training ──────────────────────────────────────────────────────────────
     "batch_size": 4,
     "lr":         5e-5,
     "num_epochs": 30,
-    "patience":   10,    # early-stopping patience (epochs without improvement)
+    "patience":   10,
 
-    # ── Output ───────────────────────────────────────────────────────────────
+    # ── Output ────────────────────────────────────────────────────────────────
     "checkpoint_dir": "Best_Model_Picasso/",
 }

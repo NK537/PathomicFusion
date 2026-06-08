@@ -1,13 +1,10 @@
 ﻿"""
 main_picasso.py
 ---------------
-5-fold cross-validation for the Picasso bimodal survival pipeline.
+5-fold cross-validation for the Picasso endoscopy survival pipeline.
 
-Runs four configurations and reports mean +/- std C-index:
-  1. histo_only      - histopathology branch alone (ablation)
-  2. endo_only       - endoscopy branch alone (ablation)
-  3. concat_fusion   - both branches, simple concat + MLP head
-  4. cross_attention - both branches, bidirectional cross-attention fusion  <-- primary
+Patient IDs are read from PicassoOnly_Outcome_train.xlsx (code column).
+Splits are performed at patient level using stratified KFold on event status.
 
 Usage:
     python main_picasso.py
@@ -15,96 +12,80 @@ Usage:
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
 
 from config_picasso import PICASSO_CONFIG
 from train_picasso import train_picasso
 
 
-def get_all_patient_ids(cfg):
-    """Return the full list of patient IDs present in all three CSVs."""
-    histo_df = pd.read_csv(cfg["histo_patches_csv"])
-    endo_df  = pd.read_csv(cfg["endo_frames_csv"])
-    label_df = pd.read_csv(cfg["label_csv"])
-
-    histo_ids = set(histo_df["patient_id"].unique())
-    endo_ids  = set(endo_df["patient_id"].unique())
-    label_ids = set(label_df["patient_id"].unique())
-
-    valid_ids = sorted(histo_ids & endo_ids & label_ids)
-    print(f"Total eligible patients: {len(valid_ids)}")
-    return valid_ids
-
-
-def run_cv(cfg, n_splits=5):
+def get_patient_ids(cfg):
     """
-    Run 5-fold CV for all four experimental configurations.
-
-    Returns a dict: config_name -> list of per-fold C-indices
+    Read all valid patient codes from the label Excel file.
+    Returns (codes, events) arrays for stratified splitting.
     """
-    all_ids = get_all_patient_ids(cfg)
-    kf      = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-    folds   = list(kf.split(all_ids))
+    raw  = pd.read_excel(cfg["label_xlsx"])
+    raw["code"] = raw["code"].astype(str).str.zfill(4)
 
-    # Four configs: name -> (fusion_type_override, ablation)
-    configs = [
-        ("histo_only",      "histo_only"),
-        ("endo_only",       "endo_only"),
-        ("concat_fusion",   None),          # cfg["fusion_type"] is overridden below
-        ("cross_attention", None),
-    ]
+    # Rename the unnamed days column
+    cols = list(raw.columns)
+    doi  = cols.index("date_of_outcome")
+    cols[doi + 1] = "days_to_outcome"
+    raw.columns = cols
 
-    results = {name: [] for name, _ in configs}
+    raw["ANY OUTCOME"] = pd.to_numeric(raw["ANY OUTCOME"], errors="coerce")
 
-    for fold_idx, (train_idx, val_idx) in enumerate(folds):
-        train_ids = [all_ids[i] for i in train_idx]
-        val_ids   = [all_ids[i] for i in val_idx]
-        print(f"\n{'='*60}")
-        print(f"FOLD {fold_idx+1}/{n_splits}  "
-              f"train={len(train_ids)}  val={len(val_ids)}")
-        print('='*60)
+    # Keep only rows with valid outcome
+    raw = raw[raw["ANY OUTCOME"].notna()].copy()
 
-        for name, ablation in configs:
-            # Clone config and set fusion_type for this run
-            run_cfg = dict(cfg)
-            if name == "concat_fusion":
-                run_cfg["fusion_type"] = "concat"
-            elif name == "cross_attention":
-                run_cfg["fusion_type"] = "cross_attention"
+    codes  = raw["code"].tolist()
+    events = raw["ANY OUTCOME"].astype(int).tolist()
 
-            c_idx = train_picasso(
-                cfg       = run_cfg,
-                train_ids = train_ids,
-                val_ids   = val_ids,
-                fold_idx  = fold_idx,
-                ablation  = ablation,
-            )
-            results[name].append(c_idx)
-
-    return results
+    print(f"Total patients: {len(codes)}  |  Events: {sum(events)}  |  Censored: {len(events)-sum(events)}")
+    return codes, events
 
 
 def print_results(results):
-    print("\n" + "="*60)
-    print("FINAL RESULTS — 5-Fold Cross-Validation")
-    print("="*60)
-    print(f"{'Config':<22} {'Mean C-idx':>12} {'Std':>8}  {'Per-fold'}")
-    print("-"*60)
+    print("\n" + "="*55)
+    print("FINAL 5-Fold CV Results — Picasso Endoscopy")
+    print("="*55)
+    print(f"{'Config':<20} {'Mean C-idx':>12} {'Std':>8}  {'Per-fold'}")
+    print("-"*55)
     for name, scores in results.items():
         arr   = np.array(scores)
         folds = "  ".join(f"{s:.4f}" for s in scores)
-        print(f"{name:<22} {arr.mean():>12.4f} {arr.std():>8.4f}  {folds}")
-    print("="*60)
+        print(f"{name:<20} {arr.mean():>12.4f} {arr.std():>8.4f}  {folds}")
+    print("="*55)
 
-    # Save CSV
-    rows = []
-    for name, scores in results.items():
-        for fold_idx, s in enumerate(scores):
-            rows.append({"config": name, "fold": fold_idx, "c_index": s})
+    rows = [
+        {"config": name, "fold": i, "c_index": s}
+        for name, scores in results.items()
+        for i, s in enumerate(scores)
+    ]
     pd.DataFrame(rows).to_csv("picasso_cv_results.csv", index=False)
-    print("Results saved to picasso_cv_results.csv")
+    print("Saved to picasso_cv_results.csv")
 
 
 if __name__ == "__main__":
-    results = run_cv(PICASSO_CONFIG, n_splits=5)
+    codes, events = get_patient_ids(PICASSO_CONFIG)
+
+    skf    = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    folds  = list(skf.split(codes, events))
+    results = {"endo_only": []}
+
+    for fold_idx, (train_idx, val_idx) in enumerate(folds):
+        train_ids = [codes[i] for i in train_idx]
+        val_ids   = [codes[i] for i in val_idx]
+
+        print(f"\n{'='*55}")
+        print(f"FOLD {fold_idx+1}/5  train={len(train_ids)}  val={len(val_ids)}")
+        print('='*55)
+
+        c_idx = train_picasso(
+            cfg       = PICASSO_CONFIG,
+            train_ids = train_ids,
+            val_ids   = val_ids,
+            fold_idx  = fold_idx,
+        )
+        results["endo_only"].append(c_idx)
+
     print_results(results)
