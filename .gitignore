@@ -1,8 +1,10 @@
 /data/
 
 .pathomic/
-venv/
-env/
+
 pathomic/
 __pycache__/
 *.pyc
+*.pth
+
+Geneformer/

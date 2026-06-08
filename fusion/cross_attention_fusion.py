@@ -63,7 +63,7 @@ class CrossAttentionFusion(nn.Module):
         # We pool token sequences -> (B, d) + (B, d) -> concat -> (B, 2d) then head -> (B,1)
         self.fusion_fc = nn.Sequential(
             nn.Linear(2 * d_model, fusion_dim),
-            nn.BatchNorm1d(fusion_dim),
+            nn.LayerNorm(fusion_dim),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.5),
             nn.Linear(fusion_dim, 1)

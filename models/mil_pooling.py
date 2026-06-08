@@ -18,6 +18,10 @@ class AttnMILPool(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         scores = self.attn(x)                 # (B, K, 1)
+        
+        # numerical stability
+        scores = scores - scores.max(dim=1, keepdim=True)[0]
+        
         w = torch.softmax(scores, dim=1)      # (B, K, 1)
         pooled = (w * x).sum(dim=1)           # (B, d)
         return pooled
