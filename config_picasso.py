@@ -24,7 +24,7 @@ PICASSO_CONFIG = {
     "endo_dim": 2048,
 
     # ── Shared branch output dim ──────────────────────────────────────────────
-    "out_dim": 64,
+    "out_dim": 128,
 
     # ── Histopathology (not available yet — branch is frozen / skipped) ───────
     # Set freeze_histo=True to use histo as fixed features once embeddings exist.
@@ -37,13 +37,13 @@ PICASSO_CONFIG = {
     "fusion_type": "cross_attention",
     "n_heads":     4,
     "n_tokens":    8,
-    "fusion_dim":  128,
+    "fusion_dim":  256,
 
     # ── Training ──────────────────────────────────────────────────────────────
-    "batch_size": 4,
-    "lr":         5e-5,
-    "num_epochs": 30,
-    "patience":   10,
+    "batch_size": 8,
+    "lr":         1e-4,
+    "num_epochs": 50,
+    "patience":   15,
 
     # ── Output ────────────────────────────────────────────────────────────────
     "checkpoint_dir": "Best_Model_Picasso/",
