@@ -1,11 +1,24 @@
-﻿import os
+import os
+import sys
+
+# ── Auto-inject the project venv so this script works regardless of which
+#    Python interpreter is used to launch it.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _venv_name in (".pathomic", "pathomic", "venv", ".venv"):
+    _sp = os.path.join(_HERE, _venv_name, "lib")
+    if os.path.isdir(_sp):
+        import glob as _glob
+        for _d in _glob.glob(os.path.join(_sp, "python*", "site-packages")):
+            if _d not in sys.path:
+                sys.path.insert(0, _d)
+        break
+
 import torch
 import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
-import sys
 
 # Spatiopath model wrapper — adjust the import once you have the repo installed.
 # Clone:  git clone https://gitlab.pasteur.fr/bia/projects/Spatiopath.git
@@ -179,13 +192,104 @@ def precompute_histo_embeddings(
 
 
 if __name__ == "__main__":
-    precompute_histo_embeddings(
-        patch_csv      = "data/Picasso/histo_patches.csv",
-        patch_dir      = "data/Picasso/histo_patches/",
-        out_dir        = "data/Picasso/histo_embeddings/",
-        use_spathopath = False,   # flip to True once Spatiopath is installed
-        batch_size     = 64,
-        num_workers    = 4,
-        fp16           = True,
-        skip_existing  = True,
-    )
+    # ── Patch images are PNG files named:  02_003 Sigmoid 1E_16_146.png
+    # ── Set patch_dir to wherever your images live, e.g.:
+    #      /mnt/d/Data/PICASSO_Histology/PicassoHistologyOLD/Histo_Neutriphils/patch_neutrophils/images/
+    #    or copy them to:
+    #      data/Picasso/histo/patch_images/
+    #
+    # ── No CSV required — we scan patch_dir directly.
+    #    out_dir receives one .pt per patch with the same stem name.
+
+    import os, sys, re
+    from tqdm import tqdm
+    from PIL import Image
+
+    patch_dir  = "data/Picasso/histo/patch_images/"
+    out_dir    = "data/Picasso/histo/histo_embeddings/"
+    batch_size = 32
+    num_workers = 4
+    fp16        = True
+    skip_existing = True
+
+    # --- validate patch_dir ---
+    if not os.path.isdir(patch_dir):
+        print(f"ERROR: patch_dir not found: {patch_dir}")
+        print("Update patch_dir above to the correct path and re-run.")
+        sys.exit(1)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+
+    model, transform = load_histo_model(device, use_spatiopath=False)
+    model.eval()
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Collect all PNG files
+    all_pngs = sorted(f for f in os.listdir(patch_dir) if f.lower().endswith(".png"))
+    print(f"Total PNG patches found: {len(all_pngs)}")
+
+    if skip_existing:
+        all_pngs = [
+            f for f in all_pngs
+            if not os.path.exists(os.path.join(out_dir, os.path.splitext(f)[0] + ".pt"))
+        ]
+        print(f"Patches remaining (skip_existing=True): {len(all_pngs)}")
+
+    if not all_pngs:
+        print("Nothing to embed — all patches already processed.")
+        sys.exit(0)
+
+    use_amp  = (device == "cuda") and fp16
+    saved    = 0
+    failed   = 0
+    batch_imgs  = []
+    batch_paths = []
+
+    def flush_batch(imgs, paths):
+        nonlocal saved, failed
+        try:
+            xb  = torch.stack(imgs).to(device, non_blocking=True)
+            if use_amp:
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    emb = model(xb)
+            else:
+                emb = model(xb)
+            emb = emb.float().detach().cpu()
+            for i, op in enumerate(paths):
+                torch.save(emb[i], op)
+            saved += len(paths)
+        except Exception as e:
+            print(f"\n[WARN] batch failed: {e}")
+            failed += len(paths)
+
+    with torch.inference_mode():
+        for fname in tqdm(all_pngs, desc="Histo embeddings"):
+            img_path = os.path.join(patch_dir, fname)
+            out_path = os.path.join(out_dir, os.path.splitext(fname)[0] + ".pt")
+            try:
+                img = Image.open(img_path).convert("RGB")
+                x   = transform(img)
+                batch_imgs.append(x)
+                batch_paths.append(out_path)
+            except Exception as e:
+                print(f"\n[WARN] could not open {fname}: {e}")
+                failed += 1
+                continue
+
+            if len(batch_imgs) == batch_size:
+                flush_batch(batch_imgs, batch_paths)
+                batch_imgs  = []
+                batch_paths = []
+
+        if batch_imgs:   # flush remainder
+            flush_batch(batch_imgs, batch_paths)
+
+    print(f"\n=== DONE ===  saved={saved}  failed={failed}  out_dir={out_dir}")
+
+    # Show sample shape
+    for f in os.listdir(out_dir):
+        if f.endswith(".pt"):
+            x = torch.load(os.path.join(out_dir, f), map_location="cpu")
+            print(f"Sample embedding shape: {x.shape}  (expected: torch.Size([1024]))")
+            break
