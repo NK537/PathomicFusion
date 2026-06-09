@@ -1,12 +1,16 @@
 ﻿# histo_pipeline/main_histo.py
 #
 # 5-fold cross-validation for the Picasso histology survival pipeline.
-# Mirrors main_picasso.py (endoscopy) exactly.
+#
+# Split strategy:
+#   Train_Outcome_rev2 = 0 or 1  -> training pool  (120 patients)
+#   Train_Outcome_rev2 = 2       -> held-out test   (evaluated separately)
+#   Train_Outcome_rev2 = -1      -> excluded
+#
+# Within the training pool, StratifiedKFold on event status gives 5 folds.
 #
 # Usage:
 #   cd /home/usama/Projects/PathomicFusion
-#   python -m histo_pipeline.main_histo
-#   -- OR --
 #   python histo_pipeline/main_histo.py
 
 import os, sys
@@ -17,53 +21,45 @@ import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
 from histo_pipeline.config_histo import HISTO_CONFIG
+from histo_pipeline.patient_histo_dataset import normalize_pat_id
 from histo_pipeline.train_histo import train_histo
 
 
-def get_patient_ids(cfg):
+def get_train_patients(cfg):
     """
-    Read all valid patient codes from the shared label Excel file.
-    Returns (codes, events) for stratified splitting.
+    Read PicassoAI_DataList_Fusion.xlsx and return training-pool patients
+    (Train_Outcome_rev2 in {0, 1}) with their binary event labels.
     """
-    raw  = pd.read_excel(cfg["label_xlsx"])
-    cols = list(raw.columns)
-    try:
-        doi = cols.index("date_of_outcome"); cols[doi + 1] = "days_to_outcome"
-    except (ValueError, IndexError):
-        for i, c in enumerate(cols):
-            if str(c).startswith("Unnamed:"): cols[i] = "days_to_outcome"; break
-    raw.columns = cols
+    df = pd.read_excel(cfg["fusion_label_xlsx"])
+    df["pat_id"] = df["Pat_ID"].apply(normalize_pat_id)
+    df["event"]  = pd.to_numeric(df["Outcome"], errors="coerce")
+    df["split"]  = pd.to_numeric(df[cfg["split_col"]], errors="coerce").fillna(-1).astype(int)
 
-    raw["code"]        = raw["code"].astype(str).str.zfill(4)
-    raw["ANY OUTCOME"] = pd.to_numeric(raw["ANY OUTCOME"], errors="coerce")
-    raw = raw[raw["ANY OUTCOME"].notna()].copy()
+    train_df = df[
+        df["split"].isin(cfg["train_vals"]) &
+        df["event"].isin([0.0, 1.0])
+    ].copy()
 
-    # Further restrict to patients that actually have histo patch embeddings
-    patch_df     = pd.read_csv(cfg["histo_patches_csv"])
-    patch_df["patient_id"] = patch_df["patient_id"].astype(str).str.zfill(4)
-    histo_ids    = set(patch_df["patient_id"].unique())
-    raw          = raw[raw["code"].isin(histo_ids)].copy()
+    pat_ids = train_df["pat_id"].tolist()
+    events  = train_df["event"].astype(int).tolist()
 
-    codes  = raw["code"].tolist()
-    events = raw["ANY OUTCOME"].astype(int).tolist()
-
-    print(f"Total histo patients : {len(codes)}")
-    print(f"Events               : {sum(events)}")
-    print(f"Censored             : {len(events) - sum(events)}")
-    return codes, events
+    print(f"Training pool : {len(pat_ids)} patients")
+    print(f"Events        : {sum(events)}")
+    print(f"Censored      : {len(events) - sum(events)}")
+    return pat_ids, events
 
 
 def print_results(results):
-    print("\n" + "=" * 58)
-    print("FINAL 5-Fold CV Results — Picasso Histology")
-    print("=" * 58)
-    print(f"{'Config':<20} {'Mean C-idx':>12} {'Std':>8}  {'Per-fold'}")
-    print("-" * 58)
+    print("\n" + "=" * 60)
+    print("FINAL 5-Fold CV Results -- Picasso Histology")
+    print("=" * 60)
+    print(f"{'Config':<20} {'Mean C-idx':>12} {'Std':>8}  Per-fold")
+    print("-" * 60)
     for name, scores in results.items():
         arr   = np.array(scores)
         folds = "  ".join(f"{s:.4f}" for s in scores)
         print(f"{name:<20} {arr.mean():>12.4f} {arr.std():>8.4f}  {folds}")
-    print("=" * 58)
+    print("=" * 60)
 
     rows = [
         {"config": name, "fold": i, "c_index": s}
@@ -76,19 +72,19 @@ def print_results(results):
 
 
 if __name__ == "__main__":
-    codes, events = get_patient_ids(HISTO_CONFIG)
+    pat_ids, events = get_train_patients(HISTO_CONFIG)
 
     skf     = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    folds   = list(skf.split(codes, events))
+    folds   = list(skf.split(pat_ids, events))
     results = {"histo_only": []}
 
     for fold_idx, (train_idx, val_idx) in enumerate(folds):
-        train_ids = [codes[i] for i in train_idx]
-        val_ids   = [codes[i] for i in val_idx]
+        train_ids = [pat_ids[i] for i in train_idx]
+        val_ids   = [pat_ids[i] for i in val_idx]
 
-        print(f"\n{'='*58}")
+        print(f"\n{'='*60}")
         print(f"FOLD {fold_idx+1}/5  train={len(train_ids)}  val={len(val_ids)}")
-        print("="*58)
+        print("="*60)
 
         c_idx = train_histo(
             cfg       = HISTO_CONFIG,

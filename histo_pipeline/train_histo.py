@@ -1,202 +1,192 @@
 ﻿# histo_pipeline/train_histo.py
 #
-# Training loop for the Picasso histology survival pipeline.
-# Mirrors train_picasso.py (endoscopy) — same Cox loss, same C-index metric.
+# Single-fold training loop for Picasso histology survival prediction.
+# Mirrors train_picasso.py (endoscopy).
+#
+# Loss:
+#   If TTE available  -> CustomCoxLoss  (C-index is meaningful)
+#   If TTE missing    -> BCE loss        (AUC reported instead of C-index)
 
-import os
-import sys
+import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-torch.set_float32_matmul_precision("high")
-
 import torch.nn as nn
-import torch.optim as optim
+import numpy as np
+import pandas as pd
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 from lifelines.utils import concordance_index
 
 from models.histo_mil_branch import HistoMILBranch
-from COX.cox_loss import CustomCoxLoss
 from histo_pipeline.patient_histo_dataset import PatientHistoDataset
+from COX.cox_loss import CustomCoxLoss
 
 
-# ── Survival head ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Survival head
+# ---------------------------------------------------------------------------
+
 class _SurvivalHead(nn.Module):
-    """FC risk head on top of the pooled histology embedding."""
-    def __init__(self, in_dim=64, hidden=128):
+    def __init__(self, in_dim: int, hidden: int = 128):
         super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.LayerNorm(hidden),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.5),
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.LayerNorm(hidden), nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(hidden, 1),
         )
 
     def forward(self, x):
-        return self.head(x).squeeze(1)   # (B,)
+        return self.net(x).squeeze(-1)   # (B,)
 
 
-def train_histo(cfg, train_ids, val_ids, fold_idx=None):
+# ---------------------------------------------------------------------------
+# Collate: pad variable-length patch bags to same K within a batch
+# ---------------------------------------------------------------------------
+
+def _pad_collate(batch):
+    embs, times, events, pids = zip(*batch)
+    max_k = max(e.shape[0] for e in embs)
+    padded = []
+    for e in embs:
+        if e.shape[0] < max_k:
+            pad = torch.zeros(max_k - e.shape[0], e.shape[1])
+            e   = torch.cat([e, pad], dim=0)
+        padded.append(e)
+    return (
+        torch.stack(padded),          # (B, max_k, D)
+        torch.stack(times),           # (B,)
+        torch.stack(events),          # (B,)
+        list(pids),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main train function
+# ---------------------------------------------------------------------------
+
+def train_histo(cfg: dict, train_ids: list, val_ids: list, fold_idx: int) -> float:
     """
-    Train one fold of the Picasso histology survival model.
-
-    Architecture:
-        HistoMILBranch  (k_patches, histo_dim) → (out_dim,)
-        SurvivalHead    (out_dim,) → risk score (scalar)
-        Loss            Cox partial likelihood
-
-    Args:
-        cfg:       HISTO_CONFIG dict from histo_pipeline/config_histo.py
-        train_ids: list of patient ``code`` strings for training
-        val_ids:   list of patient ``code`` strings for validation
-        fold_idx:  fold number used in checkpoint filename
-
-    Returns:
-        best_val_cindex (float)
+    Train one fold.  Returns validation C-index (or AUC if no TTE).
     """
-    tag = f"_fold{fold_idx}" if fold_idx is not None else ""
-    print(f"\n==== Histo | histo_only{tag} ====")
-    os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── Datasets ──────────────────────────────────────────────────────────────
-    train_ds = PatientHistoDataset(
-        label_xlsx        = cfg["label_xlsx"],
-        histo_patches_csv = cfg["histo_patches_csv"],
+    # ── Datasets ────────────────────────────────────────────────────────────
+    ds_kwargs = dict(
+        fusion_label_xlsx = cfg["fusion_label_xlsx"],
+        tte_label_xlsx    = cfg.get("tte_label_xlsx"),
         histo_emb_dir     = cfg["histo_emb_dir"],
         k_patches         = cfg["k_patches"],
-        subset_ids        = train_ids,
-    )
-    val_ds = PatientHistoDataset(
-        label_xlsx        = cfg["label_xlsx"],
-        histo_patches_csv = cfg["histo_patches_csv"],
-        histo_emb_dir     = cfg["histo_emb_dir"],
-        k_patches         = cfg["k_patches"],
-        subset_ids        = val_ids,
     )
 
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg["batch_size"],
-        shuffle=True, drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=cfg["batch_size"],
-        shuffle=False,
-    )
+    train_ds = PatientHistoDataset(**ds_kwargs, subset_ids=train_ids)
+    val_ds   = PatientHistoDataset(**ds_kwargs, subset_ids=val_ids)
 
-    # ── Model ─────────────────────────────────────────────────────────────────
-    histo_branch = HistoMILBranch(
+    if len(train_ds) == 0:
+        print("[train_histo] WARN: empty training set — returning 0.5")
+        return 0.5
+
+    train_dl = DataLoader(train_ds, batch_size=cfg["batch_size"],
+                          shuffle=True,  collate_fn=_pad_collate, drop_last=False)
+    val_dl   = DataLoader(val_ds,   batch_size=cfg["batch_size"],
+                          shuffle=False, collate_fn=_pad_collate, drop_last=False)
+
+    use_cox = train_ds.use_cox
+
+    # ── Model ────────────────────────────────────────────────────────────────
+    branch = HistoMILBranch(
         histo_dim = cfg["histo_dim"],
         out_dim   = cfg["out_dim"],
+    ).to(device)
+
+    head = _SurvivalHead(
+        in_dim = cfg["out_dim"],
+        hidden = cfg["fusion_dim"],
+    ).to(device)
+
+    optimizer = torch.optim.AdamW(
+        list(branch.parameters()) + list(head.parameters()),
+        lr=cfg["lr"], weight_decay=1e-4,
     )
-    head = _SurvivalHead(in_dim=cfg["out_dim"], hidden=cfg["fusion_dim"])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    histo_branch.to(device)
-    head.to(device)
+    cox_loss_fn = CustomCoxLoss()
+    bce_loss_fn = nn.BCEWithLogitsLoss()
 
-    trainable = list(histo_branch.parameters()) + list(head.parameters())
-    optimizer = optim.Adam(trainable, lr=cfg["lr"])
-    cox_loss  = CustomCoxLoss()
+    os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
+    ckpt_path  = os.path.join(cfg["checkpoint_dir"], f"fold{fold_idx}_best.pt")
+    best_score = -1.0
+    patience   = 0
 
-    print(f"  Device          : {device}")
-    print(f"  Train patients  : {len(train_ds)}  |  Val: {len(val_ds)}")
-    print(f"  Trainable params: {sum(p.numel() for p in trainable):,}")
-
-    # ── Training loop ─────────────────────────────────────────────────────────
-    best_val_cindex   = 0.0
-    epochs_no_improve = 0
-
+    # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(cfg["num_epochs"]):
+        branch.train(); head.train()
+        total_loss = 0.0
 
-        # ---- Train ----
-        histo_branch.train(); head.train()
-        running_loss = 0.0
-        all_scores, all_times, all_events = [], [], []
+        for embs, times, events, _ in train_dl:
+            embs   = embs.to(device)
+            times  = times.to(device)
+            events = events.to(device)
 
-        for histo_embs, surv_times, events, _ in tqdm(
-            train_loader,
-            desc=f"Epoch {epoch+1}/{cfg['num_epochs']} [train]",
-            leave=False,
-        ):
-            histo_embs = histo_embs.to(device)    # (B, k_patches, histo_dim)
-            surv_times = surv_times.to(device)
-            events     = events.to(device)
+            feats = branch(embs)       # (B, out_dim)
+            risk  = head(feats)        # (B,)
 
-            feat   = histo_branch(histo_embs)     # (B, out_dim)
-            scores = head(feat)                   # (B,)
+            if use_cox:
+                loss = cox_loss_fn(risk, times, events)
+            else:
+                loss = bce_loss_fn(risk, events)
 
-            loss = cox_loss(scores, surv_times, events)
+            if torch.isnan(loss):
+                continue
+
             optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
-
-            if not torch.isnan(loss):
-                running_loss += loss.item()
-                all_scores.extend(scores.detach())
-                all_times.extend(surv_times.detach())
-                all_events.extend(events.detach())
-
-        train_cindex = 0.0
-        if len(all_scores) > 1:
-            train_cindex = concordance_index(
-                torch.stack(all_times).cpu().numpy(),
-                (-torch.stack(all_scores)).cpu().numpy(),
-                torch.stack(all_events).cpu().numpy(),
+            torch.nn.utils.clip_grad_norm_(
+                list(branch.parameters()) + list(head.parameters()), 1.0
             )
+            optimizer.step()
+            total_loss += loss.item()
 
-        # ---- Validate ----
-        histo_branch.eval(); head.eval()
-        val_scores, val_times, val_events = [], [], []
+        # ── Validation ───────────────────────────────────────────────────────
+        branch.eval(); head.eval()
+        all_risk, all_time, all_event = [], [], []
 
         with torch.no_grad():
-            for histo_embs, surv_times, events, _ in val_loader:
-                histo_embs = histo_embs.to(device)
-                surv_times = surv_times.to(device)
-                events     = events.to(device)
+            for embs, times, events, _ in val_dl:
+                embs = embs.to(device)
+                feats = branch(embs)
+                risk  = head(feats)
+                all_risk.extend(risk.cpu().tolist())
+                all_time.extend(times.tolist())
+                all_event.extend(events.tolist())
 
-                feat   = histo_branch(histo_embs)
-                scores = head(feat)
+        # Metric
+        try:
+            if use_cox:
+                score = concordance_index(all_time, [-r for r in all_risk], all_event)
+            else:
+                from sklearn.metrics import roc_auc_score
+                score = roc_auc_score(all_event, all_risk)
+        except Exception:
+            score = 0.5
 
-                val_scores.extend(scores)
-                val_times.extend(surv_times)
-                val_events.extend(events)
+        metric_name = "C-idx" if use_cox else "AUC"
+        avg_loss    = total_loss / max(len(train_dl), 1)
+        print(f"  epoch {epoch+1:3d}/{cfg['num_epochs']}  "
+              f"loss={avg_loss:.4f}  val_{metric_name}={score:.4f}")
 
-        val_cindex = 0.0
-        if len(val_scores) > 1:
-            val_cindex = concordance_index(
-                torch.stack(val_times).cpu().numpy(),
-                (-torch.stack(val_scores)).cpu().numpy(),
-                torch.stack(val_events).cpu().numpy(),
-            )
-
-        print(
-            f"  Epoch [{epoch+1:02d}/{cfg['num_epochs']}]  "
-            f"Loss: {running_loss:.4f}  |  "
-            f"Train C-idx: {train_cindex:.4f}  |  "
-            f"Val C-idx: {val_cindex:.4f}"
-        )
-
-        # ---- Checkpoint ----
-        if val_cindex > best_val_cindex + 0.001:
-            best_val_cindex   = val_cindex
-            epochs_no_improve = 0
-            torch.save(
-                {
-                    "histo_branch": histo_branch.state_dict(),
-                    "head":         head.state_dict(),
-                    "val_cindex":   val_cindex,
-                    "epoch":        epoch,
-                    "cfg":          cfg,
-                },
-                os.path.join(cfg["checkpoint_dir"], f"histo_only{tag}.pth"),
-            )
+        if score > best_score:
+            best_score = score
+            patience   = 0
+            torch.save({
+                "branch": branch.state_dict(),
+                "head":   head.state_dict(),
+                "epoch":  epoch,
+                "score":  best_score,
+            }, ckpt_path)
         else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= cfg["patience"]:
-                print(f"  Early stopping at epoch {epoch+1}.")
+            patience += 1
+            if patience >= cfg["patience"]:
+                print(f"  Early stopping at epoch {epoch+1}")
                 break
 
-    print(f"  Best val C-index: {best_val_cindex:.4f}")
-    return best_val_cindex
+    print(f"  Best val {metric_name} = {best_score:.4f}  (saved: {ckpt_path})")
+    return best_score

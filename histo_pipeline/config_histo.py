@@ -2,55 +2,61 @@
 #
 # Configuration for the Picasso histology survival pipeline.
 #
-# Mirrors config_picasso.py (endoscopy) so both pipelines stay consistent.
+# Label files:
+#   PicassoAI_DataList_Fusion.xlsx  -> patient list, binary Outcome, train/test split
+#   PICASSO_outcome_tte.xlsx        -> time-to-event  (put in same folder when available)
 #
-# Data layout expected under data/Picasso/histo/:
-#   histo_patches.csv        columns: patient_id, patch_filename
-#   histo_patches/           raw patch images  (only needed for precomputing)
-#   histo_embeddings/        one .pt per patch  shape: (histo_dim,)
+# Patch images:
+#   Filename format:  {site}_{patient:03d} {Section} {slide}_{row}_{col}.png
+#   Example:          02_003 Sigmoid 1E_16_146.png  -> patient 02-03
+#   Folder:           set histo_patch_dir to the WSL path on your machine
 #
-# Label file is SHARED with the endoscopy pipeline:
-#   data/Picasso/PicassoOnly_Outcome_train.xlsx
-#   key columns: code (patient ID), days_to_outcome, ANY OUTCOME
+# Embeddings:
+#   Run precompute_histo_embeddings.py once to populate histo_emb_dir.
+#   One .pt file per patch, shape: (histo_dim,)
 
 HISTO_CONFIG = {
-    # ── Shared label file (same as endoscopy) ────────────────────────────────
-    "label_xlsx": "data/Picasso/PicassoOnly_Outcome_train.xlsx",
+    # Label files
+    # Primary: patient IDs + binary outcome + train/test split
+    "fusion_label_xlsx": "data/Picasso/histo/PicassoAI_DataList_Fusion.xlsx",
 
-    # ── Histology patch index ─────────────────────────────────────────────────
-    # CSV with columns: patient_id (matches `code` in label file), patch_filename
-    "histo_patches_csv": "data/Picasso/histo/histo_patches.csv",
+    # Time-to-event file. If None or file missing -> falls back to BCE loss.
+    # Place PICASSO_outcome_tte.xlsx in the same histo folder when available.
+    "tte_label_xlsx":    "data/Picasso/histo/PICASSO_outcome_tte.xlsx",
 
-    # ── Raw patch images (only needed if re-running precompute_histo_embeddings.py)
-    "histo_patch_dir":   "data/Picasso/histo/histo_patches/",
+    # Raw patch images (only needed for precompute step).
+    # WSL path: /mnt/d/Data/PICASSO_Histology/PicassoHistologyOLD/Histo_Neutriphils/patch_neutrophils/images/
+    # Or copy to: data/Picasso/histo/patch_images/
+    "histo_patch_dir":  "data/Picasso/histo/patch_neutrophils/images/",
+    "histo_mask_dir":   "data/Picasso/histo/patch_neutrophils/masks/",   # optional, not used in training
 
-    # ── Pre-computed patch embeddings ────────────────────────────────────────
-    # Run precompute_histo_embeddings.py once to populate this folder.
-    # One .pt file per patch,  shape: (histo_dim,)
-    "histo_emb_dir":     "data/Picasso/histo/histo_embeddings/",
+    # Pre-computed patch embeddings (populated by precompute_histo_embeddings.py)
+    # One .pt per patch, named identically to patch filename (stem only)
+    "histo_emb_dir":    "data/Picasso/histo/histo_embeddings/",
 
-    # ── Foundation model output dimension ────────────────────────────────────
-    # UNI      → 1024
-    # Spatiopath → check paper / repo (update here once confirmed)
+    # Foundation model output dimension: UNI (ViT-L/16) -> 1024
     "histo_dim": 1024,
 
-    # ── MIL sampling ─────────────────────────────────────────────────────────
-    # Number of patches randomly sampled per patient each epoch.
-    # Increase if GPU memory allows (more patches = better MIL estimates).
-    "k_patches": 32,
+    # Train/test split column in PicassoAI_DataList_Fusion.xlsx
+    # Values: 0=train/censored, 1=train/event, 2=test, -1=excluded
+    "split_col":   "Train_Outcome_rev2",
+    "train_vals":  [0, 1],
+    "test_vals":   [2],
 
-    # ── Branch output dim ────────────────────────────────────────────────────
-    "out_dim": 64,
+    # MIL: patches randomly sampled per patient per epoch
+    # With 1310+ patches per section, 64 gives good MIL coverage
+    "k_patches": 64,
 
-    # ── Survival head ────────────────────────────────────────────────────────
+    # Model dimensions
+    "out_dim":    64,
     "fusion_dim": 128,
 
-    # ── Training ─────────────────────────────────────────────────────────────
+    # Training
     "batch_size": 4,
     "lr":         5e-5,
     "num_epochs": 30,
     "patience":   10,
 
-    # ── Output ───────────────────────────────────────────────────────────────
+    # Output
     "checkpoint_dir": "Best_Model_Histo/",
 }
