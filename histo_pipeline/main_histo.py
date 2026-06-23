@@ -27,21 +27,20 @@ from histo_pipeline.train_histo import train_histo
 
 def get_train_patients(cfg):
     """
-    Read PicassoAI_DataList_Fusion.xlsx and return training-pool patients
-    (Train_Outcome_rev2 in {0, 1}) with their binary event labels.
+    Read PICASSO_dataframe.xlsx and return all patients with valid outcomes.
+    Aggregates per patient: outcome = max across WSIs (1 if any WSI has event).
     """
-    df = pd.read_excel(cfg["fusion_label_xlsx"])
-    df["pat_id"] = df["Pat_ID"].apply(normalize_pat_id)
-    df["event"]  = pd.to_numeric(df["Outcome"], errors="coerce")
-    df["split"]  = pd.to_numeric(df[cfg["split_col"]], errors="coerce").fillna(-1).astype(int)
+    df = pd.read_excel(cfg["histo_label_xlsx"])
+    df["ID"]      = df["ID"].apply(normalize_pat_id)
+    df["outcome"] = pd.to_numeric(df["outcome"], errors="coerce")
+    df = df[df["outcome"].isin([0.0, 1.0])].copy()
 
-    train_df = df[
-        df["split"].isin(cfg["train_vals"]) &
-        df["event"].isin([0.0, 1.0])
-    ].copy()
+    # One row per patient
+    pat_df = df.groupby("ID")["outcome"].max().reset_index()
+    pat_df["outcome"] = pat_df["outcome"].astype(int)
 
-    pat_ids = train_df["pat_id"].tolist()
-    events  = train_df["event"].astype(int).tolist()
+    pat_ids = pat_df["ID"].tolist()
+    events  = pat_df["outcome"].tolist()
 
     print(f"Training pool : {len(pat_ids)} patients")
     print(f"Events        : {sum(events)}")

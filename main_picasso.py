@@ -72,6 +72,8 @@ if __name__ == "__main__":
     folds  = list(skf.split(codes, events))
     results = {"endo_only": []}
 
+    all_oof = []
+
     for fold_idx, (train_idx, val_idx) in enumerate(folds):
         train_ids = [codes[i] for i in train_idx]
         val_ids   = [codes[i] for i in val_idx]
@@ -80,7 +82,7 @@ if __name__ == "__main__":
         print(f"FOLD {fold_idx+1}/5  train={len(train_ids)}  val={len(val_ids)}")
         print('='*55)
 
-        c_idx = train_picasso(
+        c_idx, fold_preds = train_picasso(
             cfg       = PICASSO_CONFIG,
             train_ids = train_ids,
             val_ids   = val_ids,
@@ -88,4 +90,14 @@ if __name__ == "__main__":
         )
         results["endo_only"].append(c_idx)
 
+        if fold_preds is not None:
+            fold_preds["fold"] = fold_idx
+            all_oof.append(fold_preds)
+
     print_results(results)
+
+    # Save OOF predictions for KM analysis
+    if all_oof:
+        oof_df = pd.concat(all_oof, ignore_index=True)
+        oof_df.to_csv("picasso_oof_predictions.csv", index=False)
+        print(f"OOF predictions saved to picasso_oof_predictions.csv  ({len(oof_df)} rows)")
