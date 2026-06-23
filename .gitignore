@@ -24,5 +24,9 @@ __pycache__/
 KM_Analysis/outputs/
 picasso_oof_predictions.csv
 
+Best_Model_*
+picasso_cv_results.csv
+
+
 
 
