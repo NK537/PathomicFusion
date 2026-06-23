@@ -72,10 +72,10 @@ def train_histo(cfg: dict, train_ids: list, val_ids: list, fold_idx: int) -> flo
 
     # ── Datasets ────────────────────────────────────────────────────────────
     ds_kwargs = dict(
-        fusion_label_xlsx = cfg["fusion_label_xlsx"],
-        tte_label_xlsx    = cfg.get("tte_label_xlsx"),
-        histo_emb_dir     = cfg["histo_emb_dir"],
-        k_patches         = cfg["k_patches"],
+        histo_label_xlsx = cfg["histo_label_xlsx"],
+        tte_label_xlsx   = cfg.get("tte_label_xlsx"),
+        histo_emb_dir    = cfg["histo_emb_dir"],
+        k_patches        = cfg["k_patches"],
     )
 
     train_ds = PatientHistoDataset(**ds_kwargs, subset_ids=train_ids)
