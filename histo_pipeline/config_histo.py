@@ -13,23 +13,21 @@
 #   If missing, training falls back to BCE loss.
 
 HISTO_CONFIG = {
-    # Primary label file — new unified dataframe
-    "histo_label_xlsx": "data/Picasso/histo/PICASSO_dataframe.xlsx",
+    # Primary label file
+    "histo_label_xlsx": "data/Picasso/histo_new/PICASSO_dataframe.xlsx",
 
-    # Time-to-event file (same one used by endoscopy pipeline).
-    # code column: "0101" matches ID "01-01" with dash stripped.
+    # Time-to-event file.  Columns: ID (01-01), outcome (0/1), tte (days).
+    # "-" entries treated as censored/missing.
     # If None or file missing -> falls back to BCE loss.
-    "tte_label_xlsx":   "data/Picasso/PicassoOnly_Outcome_train.xlsx",
+    "tte_label_xlsx":   "data/Picasso/histo_new/PICASSO_outcome_tte.xlsx",
 
-    # Raw patch images (only needed for precompute step).
-    # Copy from: D:\Data\PICASSO_Histology\...\patch_neutrophils\images\
-    # to:        data/Picasso/histo/patch_images/
-    "histo_patch_dir":  "data/Picasso/histo/patch_images/",
-    "histo_mask_dir":   "data/Picasso/histo/patch_masks/",   # optional
+    # Section images (large PNGs, one per tile per WSI section).
+    # Naming: {WSI}_{tile}.png  e.g. "03-10_Sigmoid_0.png"
+    "histo_patch_dir":  "data/Picasso/histo_new/sections/",
 
     # Pre-computed patch embeddings (populated by precompute_histo_embeddings.py)
-    # One .pt per patch, named identically to the patch file stem.
-    "histo_emb_dir":    "data/Picasso/histo/histo_embeddings/",
+    # One .pt per section tile, same stem as PNG.
+    "histo_emb_dir":    "data/Picasso/histo_new/histo_embeddings/",
 
     # Foundation model output dimension: UNI (ViT-L/16) -> 1024
     "histo_dim": 1024,

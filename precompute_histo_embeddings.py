@@ -205,8 +205,8 @@ if __name__ == "__main__":
     from tqdm import tqdm
     from PIL import Image
 
-    patch_dir  = "data/Picasso/histo/patch_images/"
-    out_dir    = "data/Picasso/histo/histo_embeddings/"
+    patch_dir  = "data/Picasso/histo_new/sections/"
+    out_dir    = "data/Picasso/histo_new/histo_embeddings/"
     batch_size = 32
     num_workers = 4
     fp16        = True
