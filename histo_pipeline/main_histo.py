@@ -77,6 +77,8 @@ if __name__ == "__main__":
     folds   = list(skf.split(pat_ids, events))
     results = {"histo_only": []}
 
+    all_oof = []
+
     for fold_idx, (train_idx, val_idx) in enumerate(folds):
         train_ids = [pat_ids[i] for i in train_idx]
         val_ids   = [pat_ids[i] for i in val_idx]
@@ -85,7 +87,7 @@ if __name__ == "__main__":
         print(f"FOLD {fold_idx+1}/5  train={len(train_ids)}  val={len(val_ids)}")
         print("="*60)
 
-        c_idx = train_histo(
+        c_idx, fold_preds = train_histo(
             cfg       = HISTO_CONFIG,
             train_ids = train_ids,
             val_ids   = val_ids,
@@ -93,4 +95,13 @@ if __name__ == "__main__":
         )
         results["histo_only"].append(c_idx)
 
+        if fold_preds is not None:
+            fold_preds["fold"] = fold_idx
+            all_oof.append(fold_preds)
+
     print_results(results)
+
+    if all_oof:
+        oof_df = pd.concat(all_oof, ignore_index=True)
+        oof_df.to_csv("histo_oof_predictions.csv", index=False)
+        print(f"OOF predictions saved to histo_oof_predictions.csv  ({len(oof_df)} rows)")
