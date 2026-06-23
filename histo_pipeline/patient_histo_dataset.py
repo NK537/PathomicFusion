@@ -71,42 +71,53 @@ def _load_patch_embedding(path_no_ext: str) -> torch.Tensor:
 
 def _load_tte(tte_xlsx: str) -> dict:
     """
-    Read PicassoOnly_Outcome_train.xlsx.
+    Read PICASSO_outcome_tte.xlsx.
 
     Columns used:
-        code             patient code, e.g. "0101"
-        days_to_outcome  survival time in days
-        ANY OUTCOME      event flag 0 / 1
+        ID       patient identifier, e.g. "01-01"
+        outcome  event flag 0 / 1
+        tte      days to event/censoring  ("-" or blank = missing -> NaN)
 
-    Returns dict: code -> {"event": int, "surv_time": float}
+    Returns dict: patient_id -> {"event": float, "surv_time": float}
     """
-    df   = pd.read_excel(tte_xlsx)
-    cols = list(df.columns)
+    df = pd.read_excel(tte_xlsx)
 
-    # Fix the unnamed days column that sits after date_of_outcome
-    for i, c in enumerate(cols):
-        if str(c).lower().startswith("unnamed") or str(c).lower() == "days_to_outcome":
-            cols[i] = "days_to_outcome"
-    try:
-        doi = [c.lower() for c in cols].index("date_of_outcome")
-        cols[doi + 1] = "days_to_outcome"
-    except (ValueError, IndexError):
-        pass
-    df.columns = cols
+    # Identify columns (case-insensitive)
+    col_map = {str(c).strip().lower(): c for c in df.columns}
+    id_col      = col_map.get("id")
+    outcome_col = col_map.get("outcome")
+    tte_col     = col_map.get("tte")
 
-    df["code"] = df["code"].astype(str).str.zfill(4)
+    if id_col is None:
+        print(f"[TTE] WARNING: 'ID' column not found in {tte_xlsx}. Columns: {list(df.columns)}")
+        return {}
+
+    print(f"[TTE] Using columns: id='{id_col}'  outcome='{outcome_col}'  tte='{tte_col}'")
 
     result = {}
     for _, row in df.iterrows():
-        code = str(row["code"]).strip()
-        if not code or code == "nan":
+        pid = normalize_pat_id(row[id_col])
+        if not pid or pid == "nan":
             continue
-        event     = pd.to_numeric(row.get("ANY OUTCOME",     float("nan")), errors="coerce")
-        surv_time = pd.to_numeric(row.get("days_to_outcome", float("nan")), errors="coerce")
-        result[code] = {
-            "event":     float(event)     if not pd.isna(event)     else float("nan"),
-            "surv_time": float(surv_time) if not pd.isna(surv_time) else float("nan"),
-        }
+
+        # TTE: treat "-", blank, nan as missing
+        surv_time = float("nan")
+        if tte_col is not None:
+            raw = str(row[tte_col]).strip()
+            if raw not in ("-", "", "nan", "NaN", "None"):
+                try:
+                    surv_time = float(raw)
+                except ValueError:
+                    pass
+
+        # Event
+        event = float("nan")
+        if outcome_col is not None:
+            v = pd.to_numeric(row[outcome_col], errors="coerce")
+            if not pd.isna(v):
+                event = float(v)
+
+        result[pid] = {"event": event, "surv_time": surv_time}
 
     n_valid = sum(1 for v in result.values()
                   if not pd.isna(v["surv_time"]) and v["surv_time"] > 0)
@@ -147,14 +158,14 @@ def load_labels(histo_label_xlsx: str, tte_xlsx: str = None) -> pd.DataFrame:
 
     # Overlay TTE data
     if tte_xlsx and os.path.exists(tte_xlsx):
-        tte_map = _load_tte(tte_xlsx)
+        tte_map = _load_tte(tte_xlsx)  # keyed by "01-01" directly
 
         def _get_surv(pid):
-            v = tte_map.get(pat_id_to_code(pid))
+            v = tte_map.get(pid)
             return v["surv_time"] if v else float("nan")
 
         def _get_event_tte(pid):
-            v = tte_map.get(pat_id_to_code(pid))
+            v = tte_map.get(pid)
             return v["event"] if (v and not pd.isna(v["event"])) else float("nan")
 
         pat_df["surv_time"] = pat_df["ID"].apply(_get_surv)

@@ -46,13 +46,59 @@ except ImportError:
 HISTO_EMBED_DIM = 1024
 
 
+def _load_uni_direct(device):
+    """
+    Load UNI weights directly from the local repo — no HuggingFace download.
+    Looks for pytorch_model.bin in UNI/assets/ckpts/uni/ relative to this script.
+    """
+    import timm
+    from torchvision import transforms as T
+
+    # Search for weights: try next to this script first, then CWD
+    candidates = [
+        os.path.join(_HERE, "UNI", "assets", "ckpts", "uni", "pytorch_model.bin"),
+        os.path.join(os.getcwd(), "UNI", "assets", "ckpts", "uni", "pytorch_model.bin"),
+    ]
+    ckpt = None
+    for c in candidates:
+        if os.path.isfile(c):
+            ckpt = c
+            break
+
+    if ckpt is None:
+        raise FileNotFoundError(
+            "UNI weights not found. Expected at:\n" +
+            "\n".join(f"  {c}" for c in candidates)
+        )
+
+    print(f"  Loading UNI weights from: {ckpt}")
+    model = timm.create_model(
+        "vit_large_patch16_224",
+        img_size=224,
+        patch_size=16,
+        init_values=1e-5,
+        num_classes=0,
+        dynamic_img_size=True,
+    )
+    state = torch.load(ckpt, map_location="cpu", weights_only=True)
+    model.load_state_dict(state, strict=True)
+    model = model.to(device).eval()
+
+    transform = T.Compose([
+        T.Resize((224, 224)),
+        T.ToTensor(),
+        T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+    ])
+    return model, transform
+
+
 def load_histo_model(device, use_spatiopath=False):
     """
     Load the histopathology foundation model.
 
     Priority order:
       1. Spatiopath  (if installed and use_spatiopath=True)
-      2. UNI-1       (fallback, already cloned in repo)
+      2. UNI direct  (loads from local UNI/assets/ckpts/uni/pytorch_model.bin)
     """
     if use_spatiopath and SPATIOPATH_AVAILABLE:
         print("Loading Spatiopath encoder...")
@@ -60,18 +106,10 @@ def load_histo_model(device, use_spatiopath=False):
         print("  Spatiopath loaded.")
         return model, transform
 
-    if UNI_AVAILABLE:
-        print("Loading UNI encoder (Spatiopath not available or not requested)...")
-        model, transform = get_uni_encoder(enc_name="uni", device=device)
-        model.eval()
-        print("  UNI loaded. Embedding dim: 1024")
-        return model, transform
-
-    raise RuntimeError(
-        "Neither Spatiopath nor UNI could be imported.\n"
-        "  - UNI:       clone https://github.com/mahmoodlab/UNI and pip install -e UNI/\n"
-        "  - Spatiopath: clone https://gitlab.pasteur.fr/bia/projects/Spatiopath and pip install -e Spatiopath/"
-    )
+    print("Loading UNI encoder from local weights...")
+    model, transform = _load_uni_direct(device)
+    print("  UNI loaded. Embedding dim: 1024")
+    return model, transform
 
 
 class HistoPatchDataset(Dataset):
@@ -202,12 +240,14 @@ if __name__ == "__main__":
     #    out_dir receives one .pt per patch with the same stem name.
 
     import os, sys, re
+    from PIL import Image as _PIL_Image
+    _PIL_Image.MAX_IMAGE_PIXELS = None  # allow large histology sections
     from tqdm import tqdm
     from PIL import Image
 
-    patch_dir  = "data/Picasso/histo/patch_images/"
-    out_dir    = "data/Picasso/histo/histo_embeddings/"
-    batch_size = 32
+    patch_dir  = "data/Picasso/histo_new/sections/"
+    out_dir    = "data/Picasso/histo_new/histo_embeddings/"
+    batch_size = 1
     num_workers = 4
     fp16        = True
     skip_existing = True
