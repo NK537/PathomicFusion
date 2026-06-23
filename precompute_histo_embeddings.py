@@ -247,7 +247,7 @@ if __name__ == "__main__":
     batch_paths = []
 
     def flush_batch(imgs, paths):
-        nonlocal saved, failed
+        global saved, failed
         try:
             xb  = torch.stack(imgs).to(device, non_blocking=True)
             if use_amp:
