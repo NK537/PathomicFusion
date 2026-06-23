@@ -1,5 +1,6 @@
 ﻿import os
 import torch
+import pandas as pd
 torch.set_float32_matmul_precision("high")
 
 import torch.nn as nn
@@ -34,18 +35,10 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
     """
     Train one fold of the Picasso endoscopy survival model.
 
-    Currently runs endoscopy-only (histopathology branch is frozen / not yet
-    available).  Once histo embeddings exist, swap PatientEndoDataset for
-    PatientBimodalDataset and add HistoMILBranch + CrossAttentionFusion.
-
-    Args:
-        cfg:       PICASSO_CONFIG dict from config_picasso.py
-        train_ids: list of `code` strings for training patients
-        val_ids:   list of `code` strings for validation patients
-        fold_idx:  fold number used in checkpoint filename
-
     Returns:
-        best_val_cindex (float)
+        (best_val_cindex, oof_df)
+        oof_df: DataFrame with columns [patient_id, risk_score, surv_time, event]
+                containing validation predictions at the best epoch
     """
     tag = f"_fold{fold_idx}" if fold_idx is not None else ""
     print(f"\n==== Picasso | endo_only{tag} ====")
@@ -100,6 +93,7 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_cindex   = 0.0
+    best_val_preds    = None   # saved at best epoch for KM analysis
     epochs_no_improve = 0
 
     for epoch in range(cfg["num_epochs"]):
@@ -144,8 +138,9 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
         endo_branch.eval(); head.eval()
         val_scores, val_times, val_events = [], [], []
 
+        val_pids = []
         with torch.no_grad():
-            for endo_embs, surv_times, events, _ in val_loader:
+            for endo_embs, surv_times, events, pids in val_loader:
                 endo_embs  = endo_embs.to(device)
                 surv_times = surv_times.to(device)
                 events     = events.to(device)
@@ -156,6 +151,7 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
                 val_scores.extend(scores)
                 val_times.extend(surv_times)
                 val_events.extend(events)
+                val_pids.extend(pids)
 
         val_cindex = 0.0
         if len(val_scores) > 1:
@@ -179,6 +175,13 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
         if val_cindex > best_val_cindex + 0.001:
             best_val_cindex = val_cindex
             epochs_no_improve = 0
+            # Save OOF predictions at this best epoch
+            best_val_preds = pd.DataFrame({
+                "patient_id": val_pids,
+                "risk_score": torch.stack(val_scores).cpu().numpy(),
+                "surv_time":  torch.stack(val_times).cpu().numpy(),
+                "event":      torch.stack(val_events).cpu().numpy(),
+            })
             torch.save(
                 {
                     "endo_branch": endo_branch.state_dict(),
@@ -196,7 +199,15 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
                 break
 
     print(f"  Best val C-index: {best_val_cindex:.4f}")
-    return best_val_cindex
+    if best_val_preds is None and len(val_scores) > 0:
+        # Fallback: use last epoch predictions if no improvement was ever recorded
+        best_val_preds = pd.DataFrame({
+            "patient_id": val_pids,
+            "risk_score": torch.stack(val_scores).cpu().numpy(),
+            "surv_time":  torch.stack(val_times).cpu().numpy(),
+            "event":      torch.stack(val_events).cpu().numpy(),
+        })
+    return best_val_cindex, best_val_preds
 
 
 # ── Collate — pads variable-length section sequences to same K ───────────────
