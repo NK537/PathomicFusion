@@ -20,6 +20,9 @@ __pycache__/
 *.pyc
 
 
+# Jupyter Notebook checkpoints
 KM_Analysis/outputs/
 picasso_oof_predictions.csv
+
+
 
