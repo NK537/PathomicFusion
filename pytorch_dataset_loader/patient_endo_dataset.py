@@ -17,13 +17,23 @@ def _load_embedding(path_no_ext: str) -> torch.Tensor:
 
     Always returns a 2-D tensor  (K, D)  so callers are uniform.
     """
-    for ext in [".pt", ".npy", ""]:
+    for ext in [".pt", ".npy", ".mat", ""]:
         p = path_no_ext + ext
         if not os.path.exists(p):
             continue
 
         if ext == ".npy":
             t = torch.from_numpy(np.load(p)).float()
+        elif ext == ".mat":
+            import scipy.io as sio
+            try:
+                mat = sio.loadmat(p)
+                keys = [k for k in mat.keys() if not k.startswith("_")]
+                if not keys:
+                    continue
+                t = torch.from_numpy(mat[keys[0]]).float()
+            except Exception:
+                continue
         else:
             obj = torch.load(p, map_location="cpu", weights_only=False)
             if isinstance(obj, np.ndarray):
@@ -51,17 +61,27 @@ _DATE_FMTS = ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y")
 def _parse_date(s):
     if pd.isna(s):
         return None
+    # Already a Timestamp (from Excel)
+    if isinstance(s, (pd.Timestamp, datetime)):
+        return s
     for fmt in _DATE_FMTS:
         try:
             return datetime.strptime(str(s).strip(), fmt)
         except ValueError:
             continue
-    return None
+    try:
+        return pd.Timestamp(s)
+    except Exception:
+        return None
 
 def _days_between(d1, d2) -> float | None:
-    a, b = _parse_date(d1), _parse_date(d2)
-    if a and b:
-        return float(abs((b - a).days))
+    try:
+        a = _parse_date(d1)
+        b = _parse_date(d2)
+        if a is not None and b is not None:
+            return float(abs((pd.Timestamp(b) - pd.Timestamp(a)).days))
+    except Exception:
+        pass
     return None
 
 
@@ -203,7 +223,18 @@ class PatientEndoDataset(Dataset):
                                       ("section2", "section2")]:
                 stem = f"{self.emb_prefix}_pat{code}_{sec_tag}"
                 full = os.path.join(self.emb_dir, stem)
-                if any(os.path.exists(full + ext) for ext in [".pt", ".npy", ""]):
+                def _is_valid_mat(path):
+                    try:
+                        import scipy.io as sio
+                        sio.loadmat(path)
+                        return True
+                    except Exception:
+                        return False
+
+                if any(
+                    (os.path.exists(full + ext) and (ext != ".mat" or _is_valid_mat(full + ext)))
+                    for ext in [".pt", ".npy", ".mat", ""]
+                ):
                     # Collect VCE mask for this section (may be None)
                     mask = (
                         _vce_mask(row, sec_name)

@@ -89,6 +89,9 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
 
     trainable = list(endo_branch.parameters()) + list(head.parameters())
     optimizer = optim.Adam(trainable, lr=cfg["lr"])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=5, verbose=True
+    )
     cox_loss  = CustomCoxLoss()
 
     print(f"  Device: {device}")
@@ -168,6 +171,9 @@ def train_picasso(cfg, train_ids, val_ids, fold_idx=None):
             f"Train C-idx: {train_cindex:.4f}  |  "
             f"Val C-idx: {val_cindex:.4f}"
         )
+
+                # ---- LR Scheduler ----
+        scheduler.step(val_cindex)
 
         # ---- Checkpoint ----
         if val_cindex > best_val_cindex + 0.001:

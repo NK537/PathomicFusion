@@ -24,13 +24,19 @@ from config_picasso import PICASSO_CONFIG
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def try_load(path_no_ext):
-    for ext in [".pt", ".npy", ""]:
+    for ext in [".pt", ".npy",".mat", ""]:
         p = path_no_ext + ext
         if os.path.exists(p):
             try:
                 if ext == ".npy":
                     arr = np.load(p)
                     return torch.from_numpy(arr).float(), ext or "(no ext)"
+                if ext == ".mat":
+                    import scipy.io as sio
+                    mat = sio.loadmat(p)
+                    keys = [k for k in mat.keys() if not k.startswith("_")]
+                    arr = mat[keys[0]]
+                    return torch.from_numpy(arr).float(), ext
                 obj = torch.load(p, map_location="cpu", weights_only=False)
                 if isinstance(obj, torch.Tensor):
                     return obj.float(), ext or "(no ext)"
