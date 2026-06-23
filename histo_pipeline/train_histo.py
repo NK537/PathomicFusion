@@ -11,6 +11,7 @@ import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+import pandas as pd
 import torch.nn as nn
 import numpy as np
 import pandas as pd
@@ -112,9 +113,10 @@ def train_histo(cfg: dict, train_ids: list, val_ids: list, fold_idx: int) -> flo
     bce_loss_fn = nn.BCEWithLogitsLoss()
 
     os.makedirs(cfg["checkpoint_dir"], exist_ok=True)
-    ckpt_path  = os.path.join(cfg["checkpoint_dir"], f"fold{fold_idx}_best.pt")
-    best_score = -1.0
-    patience   = 0
+    ckpt_path      = os.path.join(cfg["checkpoint_dir"], f"fold{fold_idx}_best.pt")
+    best_score     = -1.0
+    best_val_preds = None
+    patience       = 0
 
     # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(cfg["num_epochs"]):
@@ -147,16 +149,17 @@ def train_histo(cfg: dict, train_ids: list, val_ids: list, fold_idx: int) -> flo
 
         # ── Validation ───────────────────────────────────────────────────────
         branch.eval(); head.eval()
-        all_risk, all_time, all_event = [], [], []
+        all_risk, all_time, all_event, all_pids = [], [], [], []
 
         with torch.no_grad():
-            for embs, times, events, _ in val_dl:
+            for embs, times, events, pids in val_dl:
                 embs = embs.to(device)
                 feats = branch(embs)
                 risk  = head(feats)
                 all_risk.extend(risk.cpu().tolist())
                 all_time.extend(times.tolist())
                 all_event.extend(events.tolist())
+                all_pids.extend(pids)
 
         # Metric
         try:
@@ -176,6 +179,12 @@ def train_histo(cfg: dict, train_ids: list, val_ids: list, fold_idx: int) -> flo
         if score > best_score:
             best_score = score
             patience   = 0
+            best_val_preds = pd.DataFrame({
+                "patient_id": all_pids,
+                "risk_score": all_risk,
+                "surv_time":  all_time,
+                "event":      all_event,
+            })
             torch.save({
                 "branch": branch.state_dict(),
                 "head":   head.state_dict(),
@@ -189,4 +198,12 @@ def train_histo(cfg: dict, train_ids: list, val_ids: list, fold_idx: int) -> flo
                 break
 
     print(f"  Best val {metric_name} = {best_score:.4f}  (saved: {ckpt_path})")
-    return best_score
+
+    if best_val_preds is None and all_pids:
+        best_val_preds = pd.DataFrame({
+            "patient_id": all_pids,
+            "risk_score": all_risk,
+            "surv_time":  all_time,
+            "event":      all_event,
+        })
+    return best_score, best_val_preds
