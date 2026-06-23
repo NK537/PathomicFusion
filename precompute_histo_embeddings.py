@@ -85,7 +85,7 @@ def _load_uni_direct(device):
     model = model.to(device).eval()
 
     transform = T.Compose([
-        T.Resize(224),
+        T.Resize((224, 224)),
         T.ToTensor(),
         T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
     ])
@@ -240,12 +240,14 @@ if __name__ == "__main__":
     #    out_dir receives one .pt per patch with the same stem name.
 
     import os, sys, re
+    from PIL import Image as _PIL_Image
+    _PIL_Image.MAX_IMAGE_PIXELS = None  # allow large histology sections
     from tqdm import tqdm
     from PIL import Image
 
     patch_dir  = "data/Picasso/histo_new/sections/"
     out_dir    = "data/Picasso/histo_new/histo_embeddings/"
-    batch_size = 32
+    batch_size = 1
     num_workers = 4
     fp16        = True
     skip_existing = True
