@@ -62,7 +62,10 @@ def load_histo_model(device, use_spatiopath=False):
 
     if UNI_AVAILABLE:
         print("Loading UNI encoder (Spatiopath not available or not requested)...")
-        model, transform = get_uni_encoder(enc_name="uni", device=device)
+        # Weights live at UNI/assets/ckpts/uni/pytorch_model.bin
+        _uni_assets = os.path.join(_HERE, "UNI", "assets", "ckpts")
+        model, transform = get_uni_encoder(enc_name="uni", device=device,
+                                           assets_dir=_uni_assets)
         model.eval()
         print("  UNI loaded. Embedding dim: 1024")
         return model, transform
