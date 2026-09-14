@@ -117,6 +117,10 @@ def _load_tte(tte_xlsx: str) -> dict:
             if not pd.isna(v):
                 event = float(v)
 
+        # Reject impossible values: negative, zero, or Excel date serial numbers (>3000 days ~8 yrs)
+        if not pd.isna(surv_time) and (surv_time <= 0 or surv_time > 3000):
+            surv_time = float("nan")
+
         result[pid] = {"event": event, "surv_time": surv_time}
 
     n_valid = sum(1 for v in result.values()

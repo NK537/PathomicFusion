@@ -20,10 +20,17 @@ __pycache__/
 *.pyc
 
 
-# Jupyter Notebook checkpoints
+#BestModels
+
+Best_*
+
+
+#KM outputs
 KM_Analysis/outputs/
+
 picasso_oof_predictions.csv
 
+picasso_cv_results.csv
 
 UNI/
 
